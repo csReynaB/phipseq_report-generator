@@ -51,7 +51,11 @@ flags_to_patterns <- list(
 )
 flags <- c(names(flags_to_patterns)) # no extra annotation
 taxa_to_plot <- unlist(flags_to_patterns)
-pvals_taxa <- pvals_df[pvals_df[,1] %in% taxa_to_plot,]$p.adj
+pvals_taxa <- pvals_df %>%
+  dplyr::filter(newTaxaCol %in% taxa_to_plot) %>% #if newTaxaCol otherwrise species or whatever lineage to use
+  dplyr::mutate(newTaxaCol = factor(newTaxaCol, levels = taxa_to_plot)) %>%
+  dplyr::arrange(newTaxaCol) %>% 
+  pull(p.adj)
 col_taxa <- c(Bos = "purple", CMV = "dodgerblue3", Enterovirus="#d95f02", Bacteroides="forestgreen")
 
 # flags_list <- make_flag_lists(pvals_df,

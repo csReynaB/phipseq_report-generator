@@ -14,6 +14,7 @@ library("rstatix")
 library("ggvenn")
 library("ggmsa")
 library("RColorBrewer")
+library("openxlsx")
 
 # Global vars
 
@@ -339,14 +340,14 @@ plot_groups_boxplots <- function(data, group_col, values_col, custom_colors,
       mutate(p.format = sapply(p.adj, format_pval))
   } else if (n_groups > 2) {
     kw <- kruskal_test(data, formula = as.formula(paste0("`", values_col, "` ~ ", group_col)) )
-    if (kw$p <= sig_level) {
+    #if (kw$p <= sig_level) {
       pvals_df <- data %>%
         rstatix::dunn_test( formula = as.formula(paste0("`", values_col, "` ~ ", group_col)), p.adjust.method = "BH") %>%
         rstatix::add_xy_position(x = group_col) %>%
         dplyr::filter(p.adj <= sig_level) %>% 
         dplyr::rename(p.signif = p.adj.signif) %>%
         mutate(p.format = sapply(p.adj, format_pval))
-    }
+    #}
   }
   
   
@@ -820,7 +821,6 @@ make_interactive_scatterplot <- function(comparison_df,
     }
     
     # --- Reverse legend starting from second element only ---
-    # --- Reverse legend starting from second element only ---
     if (reverse_legend && length(interactive_plot$x$data) > 1) {
       # Keep first trace as is
       first_trace <- interactive_plot$x$data[[1]]
@@ -1093,6 +1093,7 @@ group_test_analysis <- function(percentage_group_test_list, num_samples_per_grou
             pvals_not_adj = pvals_chisq,
             passed_not_adj = ifelse(pvals_chisq < 0.05, TRUE, FALSE),
             pvals_bh = p.adjust(pvals_not_adj, method = "BH"),
+            pvals_bh_format = sapply(pvals_bh, format_pval),
             passed_bh = p.adjust(pvals_not_adj, method = "BH") < 0.05,#,
             categories = case_when(
               passed_bh                     ~ "significant post FDR correction",
@@ -1102,7 +1103,7 @@ group_test_analysis <- function(percentage_group_test_list, num_samples_per_grou
           )  %>%
           dplyr::arrange(
             #Delta_ratio,            # then by direction of change
-            !passed_bh,            # TRUE (significant) comes first
+            #!passed_bh,            # TRUE (significant) comes first
             pvals_bh,              # then smallest BH-adjusted p-values
             pvals_not_adj,        # then smallest raw p-values
           ) %>%
@@ -3052,3 +3053,279 @@ prep_taxa_stats <- function(
 }
 
 
+
+
+## Longitudinal ART model
+
+get_art_contrast_term <- function(model_formula) {
+  
+  # extract RHS as terms object
+  tt <- terms(model_formula)
+  
+  # fixed-effect labels (includes interactions)
+  term_labels <- attr(tt, "term.labels")
+  
+  # remove random effects like (1 | Subject)
+  fixed_terms <- term_labels[!grepl("\\|", term_labels)]
+  
+  if (length(fixed_terms) == 0) {
+    stop("No fixed effects found in model formula.")
+  }
+  
+  # prefer interaction terms if present
+  interaction_terms <- fixed_terms[grepl(":", fixed_terms)]
+  
+  if (length(interaction_terms) > 0) {
+    return(interaction_terms)
+  }
+  
+  # otherwise return main effects
+  return(fixed_terms)
+}
+
+### Longitudinal ART test
+plot_art_boxplot <- function(
+    data,
+    values_col,
+    group_col,
+    model_formula = NULL,            # formula, e.g. values ~ Timepoint * Responder + (1|Subject)
+    #formula = "Timepoint:Responder",  # Timepoint:Responder
+    group_split_cols = NULL,         # optional: e.g. c("Timepoint", "Responder")
+    split_sep = "_",                 # how to split the group column
+    subject_pattern = "\\d{3}(?=BL|W3|W6)", # regex pattern for extracting Subject
+    time_levels = NULL,              # optional custom factor levels
+    responder_levels = NULL,         # optional custom factor levels
+    sig_level = 1,
+    group_order = NULL,              # optional order of combined groups
+    custom_colors = NULL,
+    x_labels = NULL,
+    x_title_lab = NULL,
+    y_title_lab = NULL,
+    label_format = "p.format",
+    adjust_method = "BH"
+) {
+  
+  library("ARTool")
+  
+  df <- data
+  
+  # --- 1. Optionally split Group column ---
+  if (!is.null(group_split_cols)) {
+    df <- df %>%
+      separate({{ group_col }}, into = group_split_cols, sep = split_sep, remove = FALSE)
+  }
+  
+  # --- 2. Optionally extract Subject ---
+  if (!is.null(subject_pattern) && "SampleName" %in% names(df)) {
+    df <- df %>%
+      mutate(Subject = str_extract(SampleName, subject_pattern))
+  }
+  
+  # --- 3. Apply optional factor levels ---
+  if (!is.null(time_levels) && "Timepoint" %in% names(df)) {
+    df <- df %>% mutate(Timepoint = factor(Timepoint, levels = time_levels))
+  }
+  if (!is.null(responder_levels) && "Responder" %in% names(df)) {
+    df <- df %>% mutate(Responder = factor(Responder, levels = responder_levels))
+  }
+  
+  # --- 4. Rename value column for formula simplicity ---
+  df <- df %>% rename(values = all_of(values_col))
+  
+  # --- 5. Default formula ---
+  if (is.null(model_formula)) {
+    if (all(c("Timepoint", "Responder") %in% names(df))) {
+      model_formula <- values ~ Timepoint * Responder + (1 | Subject)
+    } else {
+      stop("Please provide a model_formula or include 'Timepoint' and 'Responder' columns.")
+    }
+  }
+  
+  contrast_term <- get_art_contrast_term(model_formula)
+  # --- 6. Run ART model ---
+  model_art <- art(model_formula, data = df)
+  pvals_df <- as.data.frame(art.con(model_art,  formula = contrast_term, adjust = adjust_method))
+  
+  # --- 7. Clean contrast names ---
+  pvals_df <- pvals_df %>%
+    mutate(
+      contrast_clean = str_replace_all(contrast, "[\\(\\)]", ""),
+      contrast_clean = str_replace_all(contrast_clean, "(?<=\\w),(?=\\w)", "_"),
+      contrast_clean = str_replace_all(contrast_clean, " - ", ",")
+    ) %>%
+    separate(contrast_clean, into = c("group1", "group2"), sep = ",", remove = FALSE) %>%
+    mutate(
+      p.signif = case_when(
+        p.value > 0.05 ~ "ns",
+        p.value <= 0.0001 ~ "****",
+        p.value <= 0.001 ~ "***",
+        p.value <= 0.01 ~ "**",
+        p.value <= 0.05 ~ "*"
+      ),
+      p.format = sapply(p.value, format_pval)
+    ) %>%
+    dplyr::filter(p.value <= sig_level)
+  
+  
+  
+  # --- 8. Optional group reordering ---
+  if (!is.null(group_order)) {
+    pvals_df <- pvals_df %>%
+      rowwise() %>%
+      mutate(
+        pos1 = match(group1, group_order),
+        pos2 = match(group2, group_order),
+        tmp1 = ifelse(pos1 > pos2, group2, group1),
+        tmp2 = ifelse(pos1 > pos2, group1, group2),
+        group1 = tmp1,
+        group2 = tmp2
+      ) %>%
+      ungroup() %>%
+      select(-tmp1, -tmp2, -pos1, -pos2) %>%
+      mutate(
+        group1 = factor(group1, levels = group_order),
+        group2 = factor(group2, levels = group_order)
+      ) %>%
+      arrange(group1, group2)
+  }
+  
+  # --- 9. Dunn’s test to get y positions ---
+  # tmp <- data %>%
+  #   rstatix::dunn_test(formula = as.formula(paste0("`", values_col, "` ~ ", group_col)), p.adjust.method = "BH")  %>%
+  #   rstatix::add_xy_position(x = group_col) %>%
+  #   dplyr::filter(p.adj <= 1) %>%
+  #   select(group1, group2, y.position)
+  #pvals_df <- pvals_df %>%
+  #  left_join(tmp, by = c("group1", "group2"))
+  n_y_pos <- dim(pvals_df)[1]
+  y_pos <- data %>%
+    rstatix::dunn_test(formula = as.formula(paste0("`", values_col, "` ~ ", group_col)), p.adjust.method = "BH")  %>%
+    rstatix::add_xy_position(x = group_col) %>%
+    dplyr::filter(p.adj <= 1) %>%
+    select(y.position) %>% 
+    head(n_y_pos)
+  pvals_df$y.position <- y_pos$y.position 
+  
+  # --- 10. Plot ---
+  group_sym <- rlang::sym(group_col)
+  values_sym <- rlang::sym(values_col)
+  
+  if (is.null(x_labels)){
+    df_counts <- data %>%
+      group_by(!!group_sym) %>%
+      summarize(sample_count = n(), .groups = "drop")
+    
+    x_labels <- setNames(
+      paste0(df_counts[[group_col]], "\n(n = ", df_counts$sample_count, ")"),
+      df_counts[[group_col]]
+    )
+  }
+  
+  p <- ggplot(data, aes(x = !!group_sym, y = !!values_sym)) +
+    geom_boxplot(show.legend = FALSE, outlier.shape = NA, aes(fill = !!group_sym)) +
+    geom_jitter(color = "black", size = 1, width = 0.2, alpha = 0.3, show.legend = FALSE) +
+    scale_fill_manual(values = custom_colors) +
+    scale_x_discrete(labels = x_labels) +
+    theme_bw(base_size = 13) +
+    theme(
+      axis.text.x = element_text(angle = 45, vjust = 0.6, hjust = 0.5),
+      axis.text.x.bottom = element_text(size = 13),
+      axis.text.y.left = element_text(size = 13),
+      axis.title.y = element_text(size = 13),
+      axis.title.x = element_text(size = 13),
+      plot.margin = margin(0, 1, 0, 1, unit = "pt"),
+      panel.grid = element_blank()
+    ) +
+    labs(x = x_title_lab,
+         y = y_title_lab) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+  
+  if (nrow(pvals_df) > 0) {
+    p <- p + stat_pvalue_manual(
+      data = pvals_df,
+      label = label_format,
+      y.position = "y.position",
+      tip.length = 0.02,
+      bracket.size = 0.25,
+      size = 4,
+      inherit.aes = FALSE,
+      step.increase = 0.1
+    )
+  }
+  
+  return(list(plot = p, stats = pvals_df, art_model = model_art))
+}
+
+
+plot_pcoa_interactive <- function(beta_diversity, custom_colors,
+                                  ellipse = TRUE, permutations = 999,
+                                  show_legend = TRUE, interactive = TRUE) {
+  mds_scores   <- beta_diversity$pcoa
+  permanova    <- beta_diversity$perm
+  disp         <- beta_diversity$beta_dispersion
+  var_exp_all  <- beta_diversity$exp_variance
+  
+  # handle Samplename vs SampleName
+  if ("Samplename" %in% names(mds_scores) && !("SampleName" %in% names(mds_scores))) {
+    mds_scores <- dplyr::rename(mds_scores, SampleName = Samplename)
+  }
+  
+  disp_perm  <- vegan::permutest(disp, permutations = permutations)
+  centroids  <- disp$centroids |> as.data.frame() |> tibble::rownames_to_column("Group")
+  
+  p_perm_val <- permanova$`Pr(>F)`[1]
+  p_disp_val <- disp_perm$tab$`Pr(>F)`[1]
+  lab_perm   <- paste0("PERMANOVA p = ", format.pval(p_perm_val, digits = 1, eps = 0.01))
+  lab_disp   <- paste0("Dispersion   p = ", format.pval(p_disp_val, digits = 1, eps = 0.01))
+  
+  p <- ggplot(mds_scores, aes(x = PCoA1, y = PCoA2, fill = Group)) +
+    { if (ellipse)
+      stat_ellipse(aes(colour = Group), type = "t", level = 0.95,
+                   fill = NA, geom = "path", size = 0.9, alpha = 0.8, show.legend = FALSE)
+      else NULL } +
+    # main points with hover text
+    geom_point(aes(text = paste("Sample:", SampleName)), size = 4, alpha = 0.7,
+               shape = 21, color = "black", stroke = 0) +
+    # centroids (no hover text)
+    geom_point(data = centroids, aes(x = PCoA1, y = PCoA2, fill = Group),
+               show.legend = FALSE, size = 6, shape = 21, color = "black") +
+    scale_fill_manual(values = custom_colors) +
+    scale_color_manual(values = custom_colors) +
+    guides(color = "none") +
+    labs(
+      x = paste0("PCoA 1 (", var_exp_all[1], "%)"),
+      y = paste0("PCoA 2 (", var_exp_all[2], "%)")
+    ) +
+    theme_bw(base_size = 14) +
+    theme(
+      legend.position       = if (show_legend) c(0.99, 0.5) else "none",
+      legend.justification  = c("right", "center"),
+      legend.background     = element_blank(),
+      legend.box.background = element_blank(),
+      legend.key.size       = unit(14, "pt"),
+      legend.text           = element_text(size = 14),
+      legend.title          = element_text(size = 14),
+      axis.text.y.left      = element_text(size = 13),
+      axis.text.x.bottom    = element_text(size = 13),
+      axis.title.y          = element_text(size = 14),
+      axis.title.x          = element_text(size = 14, margin = margin(t = 1)),
+      plot.margin           = margin(2, 4, 2, 4, unit = "pt")
+    ) +
+    annotate("text", x = Inf, y = -Inf, label = paste(lab_perm, lab_disp, sep = "\n"),
+             hjust = 1.1, vjust = -0.1, size = 4)
+  
+  if (!interactive) return(p)
+  
+  # Convert to interactive with hover on points only
+  plt <- plotly::ggplotly(p, tooltip = "text")
+  
+  # Optional: hide tooltips for non-point layers (ellipses/centroids) if any slipped through
+  for (i in seq_along(plt$x$data)) {
+    tr <- plt$x$data[[i]]
+    # keep only the scatter layer with text (your sample points)
+    if (is.null(tr$text)) {
+      plt$x$data[[i]]$hoverinfo <- "skip"
+    }
+  }
+  plt
+}
