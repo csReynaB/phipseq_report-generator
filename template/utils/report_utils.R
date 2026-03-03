@@ -3150,7 +3150,7 @@ plot_art_boxplot <- function(
   pvals_df <- pvals_df %>%
     mutate(
       contrast_clean = str_replace_all(contrast, "[\\(\\)]", ""),
-      contrast_clean = str_replace_all(contrast_clean, "(?<=\\w),(?=\\w)", "_"),
+      contrast_clean = str_replace_all(contrast_clean, "(?<=\\w),(?=\\w)", split_sep),
       contrast_clean = str_replace_all(contrast_clean, " - ", ",")
     ) %>%
     separate(contrast_clean, into = c("group1", "group2"), sep = ",", remove = FALSE) %>%
@@ -3222,8 +3222,8 @@ plot_art_boxplot <- function(
   }
   
   p <- ggplot(data, aes(x = !!group_sym, y = !!values_sym)) +
-    geom_boxplot(show.legend = FALSE, outlier.shape = NA, aes(fill = !!group_sym)) +
-    geom_jitter(color = "black", size = 1, width = 0.2, alpha = 0.3, show.legend = FALSE) +
+    geom_boxplot(width = 0.3, show.legend = FALSE, outlier.shape = NA, aes(fill = !!group_sym)) +
+    #geom_jitter(color = "black", size = 1, width = 0.2, alpha = 0.3, show.legend = FALSE) +
     scale_fill_manual(values = custom_colors) +
     scale_x_discrete(labels = x_labels) +
     theme_bw(base_size = 13) +

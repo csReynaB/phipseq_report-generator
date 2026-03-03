@@ -234,8 +234,7 @@ for(rank_level in c("peptide", rank_levels)) {
 - Together, these panels tell you whether (a) the two groups occupy distinct regions of Bray–Curtis space (significant PERMANOVA) and (b) whether one group is more dispersed than the other (significant dispersion test).
 
 ```{r beta‐all‐ranks, results='asis', fig.width=8, fig.height=4}
-for (rank_level in c(rank_levels)) {
-  
+for (rank_level in c("peptide", rank_levels)) {  
   cat("\n\n## ", tools::toTitleCase(rank_level), " {.tabset} \n\n")
   
   if (rank_level %in% "peptide") {
